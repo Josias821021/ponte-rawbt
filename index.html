@@ -196,9 +196,24 @@ function setStatus(state, text, detail) {
   el.statusDetail.textContent = detail || '';
 }
 
-// Converte texto UTF-8 para base64 de forma segura (acentos, emojis, etc.)
+// Impressoras térmicas ESC/POS esperam Latin-1 (ISO-8859-1), não UTF-8.
+// Convertendo dessa forma, acentos como á, é, ã saem corretos no papel.
 function utf8ToBase64(str) {
-  return btoa(unescape(encodeURIComponent(str)));
+  try {
+    return btoa(str);
+  } catch (e) {
+    // Se tiver algum caractere fora do intervalo Latin-1, substitui por "?"
+    return btoa(str.replace(/[^\x00-\xFF]/g, '?'));
+  }
+}
+
+// Aciona o RawBT via iframe escondido (não navega a página, não trava o restante do código)
+function acionarRawbt(texto) {
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.src = buildRawbtLink(texto);
+  document.body.appendChild(iframe);
+  setTimeout(() => iframe.remove(), 2000);
 }
 
 function buildRawbtLink(texto) {
@@ -223,17 +238,18 @@ async function checarPedidoPendente() {
       lastPrinted = data;
       el.btnReprint.disabled = false;
 
-      // Aciona o RawBT
-      window.location.href = buildRawbtLink(data.texto);
-
-      // Confirma impressão no n8n para não imprimir de novo
+      // Marca como impresso ANTES de imprimir — assim, mesmo que o RawBT
+      // demore ou peça confirmação, o pedido nunca fica preso na fila de novo.
       await fetch(base + '/fila-impressao/marcar-impresso', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: data.id })
       });
-
       addLog('Pedido ' + data.id + ' marcado como impresso.', 'success');
+
+      // Aciona o RawBT (via iframe, não trava a página)
+      acionarRawbt(data.texto);
+
       setStatus('on', 'Monitorando', 'Última checagem: ' + new Date().toLocaleTimeString('pt-BR'));
     } else {
       setStatus('on', 'Monitorando', 'Nenhum pedido pendente · ' + new Date().toLocaleTimeString('pt-BR'));
@@ -275,7 +291,7 @@ el.btnStop.addEventListener('click', () => {
 el.btnReprint.addEventListener('click', () => {
   if (!lastPrinted) return;
   addLog('Reimprimindo pedido ' + lastPrinted.id + '...');
-  window.location.href = buildRawbtLink(lastPrinted.texto);
+  acionarRawbt(lastPrinted.texto);
 });
 </script>
 </body>

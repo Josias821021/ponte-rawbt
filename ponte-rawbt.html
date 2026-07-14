@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Ponte de Impressão · RawBT</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --border: #262b36;
+    --text: #e8eaed;
+    --muted: #8b93a3;
+    --accent: #ff6a3d;
+    --ok: #3ddc84;
+    --err: #ff5470;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 20px;
+  }
+  .wrap { max-width: 480px; margin: 0 auto; }
+  h1 {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 0 0 12px;
+  }
+
+  label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin: 10px 0 4px;
+  }
+  input[type=text], input[type=number] {
+    width: 100%;
+    background: #0d0f13;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+    transition: background 0.2s;
+  }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.off { background: var(--err); }
+  .status-text { font-size: 14px; }
+  .status-detail { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  button {
+    border: none;
+    border-radius: 10px;
+    padding: 13px 16px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+  }
+  .btn-primary { background: var(--accent); color: #1a0d07; }
+  .btn-primary:disabled { opacity: 0.5; }
+  .btn-secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    margin-top: 8px;
+  }
+
+  .log {
+    max-height: 220px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 6px;
+  }
+  .log-entry {
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: #0d0f13;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .log-entry.success { border-color: rgba(61,220,132,0.35); color: var(--ok); }
+  .log-entry.error { border-color: rgba(255,84,112,0.35); color: var(--err); }
+
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(255,106,61,0.15);
+    color: var(--accent);
+    margin-left: 6px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🖨️ Ponte de Impressão <span class="badge">RawBT</span></h1>
+  <div class="sub">Deixe esta página aberta no celular que tem o RawBT instalado. Ela fica checando novos pedidos no n8n e manda imprimir automaticamente.</div>
+
+  <div class="card">
+    <h2>Configuração</h2>
+    <label>URL base do n8n (webhook)</label>
+    <input type="text" id="baseUrl" placeholder="https://cheapguppy-n8n.cloudfy.live/webhook">
+    <label>Intervalo de checagem (segundos)</label>
+    <input type="number" id="interval" value="5" min="2" max="60">
+    <button class="btn-primary" id="btnStart">Iniciar monitoramento</button>
+    <button class="btn-secondary" id="btnStop" disabled>Parar</button>
+  </div>
+
+  <div class="card">
+    <h2>Status</h2>
+    <div class="status-row">
+      <div class="dot" id="dot"></div>
+      <div>
+        <div class="status-text" id="statusText">Parado</div>
+        <div class="status-detail" id="statusDetail">Configure a URL e clique em iniciar</div>
+      </div>
+    </div>
+    <button class="btn-secondary" id="btnReprint" disabled>Reimprimir último pedido</button>
+  </div>
+
+  <div class="card">
+    <h2>Atividade recente</h2>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+let polling = false;
+let timer = null;
+let lastPrinted = null;
+
+const el = {
+  baseUrl: document.getElementById('baseUrl'),
+  interval: document.getElementById('interval'),
+  btnStart: document.getElementById('btnStart'),
+  btnStop: document.getElementById('btnStop'),
+  btnReprint: document.getElementById('btnReprint'),
+  dot: document.getElementById('dot'),
+  statusText: document.getElementById('statusText'),
+  statusDetail: document.getElementById('statusDetail'),
+  log: document.getElementById('log'),
+};
+
+function addLog(message, type) {
+  const entry = document.createElement('div');
+  entry.className = 'log-entry' + (type ? ' ' + type : '');
+  const time = new Date().toLocaleTimeString('pt-BR');
+  entry.textContent = '[' + time + '] ' + message;
+  el.log.appendChild(entry);
+  while (el.log.children.length > 30) el.log.removeChild(el.log.firstChild);
+}
+
+function setStatus(state, text, detail) {
+  el.dot.className = 'dot' + (state ? ' ' + state : '');
+  el.statusText.textContent = text;
+  el.statusDetail.textContent = detail || '';
+}
+
+// Converte texto UTF-8 para base64 de forma segura (acentos, emojis, etc.)
+function utf8ToBase64(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+function buildRawbtLink(texto) {
+  // ESC/POS: inicializa impressora + texto + corta o papel
+  const init = '\x1B\x40';       // ESC @ (reset)
+  const corte = '\x1D\x56\x00';  // GS V 0 (corte total)
+  const conteudo = init + texto + '\n\n\n' + corte;
+  return 'rawbt:base64,' + utf8ToBase64(conteudo);
+}
+
+async function checarPedidoPendente() {
+  const base = el.baseUrl.value.replace(/\/$/, '');
+  try {
+    const resp = await fetch(base + '/fila-impressao/proximo', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+
+    if (data && data.found) {
+      addLog('Novo pedido encontrado (id: ' + data.id + '). Enviando para o RawBT...', 'success');
+      setStatus('on', 'Imprimindo...', 'Pedido ' + data.id);
+
+      lastPrinted = data;
+      el.btnReprint.disabled = false;
+
+      // Aciona o RawBT
+      window.location.href = buildRawbtLink(data.texto);
+
+      // Confirma impressão no n8n para não imprimir de novo
+      await fetch(base + '/fila-impressao/marcar-impresso', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: data.id })
+      });
+
+      addLog('Pedido ' + data.id + ' marcado como impresso.', 'success');
+      setStatus('on', 'Monitorando', 'Última checagem: ' + new Date().toLocaleTimeString('pt-BR'));
+    } else {
+      setStatus('on', 'Monitorando', 'Nenhum pedido pendente · ' + new Date().toLocaleTimeString('pt-BR'));
+    }
+  } catch (err) {
+    setStatus('off', 'Erro de conexão', err.message);
+    addLog('Erro ao checar fila: ' + err.message, 'error');
+  }
+}
+
+el.btnStart.addEventListener('click', () => {
+  if (!el.baseUrl.value.trim()) {
+    addLog('Informe a URL base do n8n antes de iniciar.', 'error');
+    return;
+  }
+  polling = true;
+  el.btnStart.disabled = true;
+  el.btnStop.disabled = false;
+  el.baseUrl.disabled = true;
+  el.interval.disabled = true;
+  addLog('Monitoramento iniciado.');
+  setStatus('on', 'Monitorando', 'Iniciando...');
+  checarPedidoPendente();
+  const seconds = Math.max(2, parseInt(el.interval.value, 10) || 5);
+  timer = setInterval(checarPedidoPendente, seconds * 1000);
+});
+
+el.btnStop.addEventListener('click', () => {
+  polling = false;
+  clearInterval(timer);
+  el.btnStart.disabled = false;
+  el.btnStop.disabled = true;
+  el.baseUrl.disabled = false;
+  el.interval.disabled = false;
+  setStatus('', 'Parado', 'Monitoramento pausado');
+  addLog('Monitoramento parado.');
+});
+
+el.btnReprint.addEventListener('click', () => {
+  if (!lastPrinted) return;
+  addLog('Reimprimindo pedido ' + lastPrinted.id + '...');
+  window.location.href = buildRawbtLink(lastPrinted.texto);
+});
+</script>
+</body>
+</html>

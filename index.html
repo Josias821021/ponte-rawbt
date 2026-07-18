@@ -207,21 +207,22 @@ function utf8ToBase64(str) {
   }
 }
 
-// Aciona o RawBT via iframe escondido (não navega a página, não trava o restante do código)
-function acionarRawbt(texto) {
-  const iframe = document.createElement('iframe');
-  iframe.style.display = 'none';
-  iframe.src = buildRawbtLink(texto);
-  document.body.appendChild(iframe);
-  setTimeout(() => iframe.remove(), 2000);
-}
-
 function buildRawbtLink(texto) {
   // ESC/POS: inicializa impressora + texto + corta o papel
   const init = '\x1B\x40';       // ESC @ (reset)
   const corte = '\x1D\x56\x00';  // GS V 0 (corte total)
   const conteudo = init + texto + '\n\n\n' + corte;
   return 'rawbt:base64,' + utf8ToBase64(conteudo);
+}
+
+// FIX: navegação direta em vez de iframe escondido.
+// O RawBT espera ser aberto via navegação de página inteira (document.location / window.location),
+// não via src de iframe — navegar um iframe pra um esquema custom (rawbt:) costuma ser bloqueado
+// silenciosamente pelo Android/Chrome, sem gerar erro no console. Por isso os pedidos automáticos
+// não chegavam na impressora, mesmo o log mostrando "enviando para o RawBT".
+function acionarRawbt(texto) {
+  const link = buildRawbtLink(texto);
+  window.location.href = link;
 }
 
 async function checarPedidoPendente() {
@@ -247,7 +248,7 @@ async function checarPedidoPendente() {
       });
       addLog('Pedido ' + data.id + ' marcado como impresso.', 'success');
 
-      // Aciona o RawBT (via iframe, não trava a página)
+      // Aciona o RawBT (navegação direta)
       acionarRawbt(data.texto);
 
       setStatus('on', 'Monitorando', 'Última checagem: ' + new Date().toLocaleTimeString('pt-BR'));

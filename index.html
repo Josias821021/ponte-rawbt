@@ -207,22 +207,38 @@ function utf8ToBase64(str) {
   }
 }
 
-function buildRawbtLink(texto) {
-  // ESC/POS: inicializa impressora + texto + corta o papel
-  const init = '\x1B\x40';       // ESC @ (reset)
-  const corte = '\x1D\x56\x00';  // GS V 0 (corte total)
-  const conteudo = init + texto + '\n\n\n' + corte;
-  return 'rawbt:base64,' + utf8ToBase64(conteudo);
-}
-
-// FIX: navegação direta em vez de iframe escondido.
-// O RawBT espera ser aberto via navegação de página inteira (document.location / window.location),
-// não via src de iframe — navegar um iframe pra um esquema custom (rawbt:) costuma ser bloqueado
-// silenciosamente pelo Android/Chrome, sem gerar erro no console. Por isso os pedidos automáticos
-// não chegavam na impressora, mesmo o log mostrando "enviando para o RawBT".
+// Envia o pedido para impressão via WebSocket local (app "Server for RawBT", porta 40213).
+// Diferente da navegação por esquema de URL (rawbt:...), uma conexão WebSocket é apenas
+// uma chamada de rede e não exige gesto do usuário — por isso funciona mesmo quando
+// disparada automaticamente pelo timer, sem toque na tela. O app "Server for RawBT"
+// precisa estar instalado e aberto em segundo plano no mesmo celular da impressora.
 function acionarRawbt(texto) {
-  const link = buildRawbtLink(texto);
-  window.location.href = link;
+  return new Promise((resolve, reject) => {
+    const init = '\x1B\x40';       // ESC @ (reset)
+    const corte = '\x1D\x56\x00';  // GS V 0 (corte total)
+    const conteudo = init + texto + '\n\n\n' + corte;
+    const base64 = utf8ToBase64(conteudo);
+
+    const socket = new WebSocket('ws://127.0.0.1:40213/');
+    socket.binaryType = 'arraybuffer';
+
+    const timeoutId = setTimeout(() => {
+      socket.close();
+      reject(new Error('Timeout ao conectar no Server for RawBT (app está aberto?)'));
+    }, 4000);
+
+    socket.onopen = () => {
+      clearTimeout(timeoutId);
+      socket.send(base64);
+      socket.close(1000, 'Work complete');
+      resolve();
+    };
+
+    socket.onerror = () => {
+      clearTimeout(timeoutId);
+      reject(new Error('Falha ao conectar no Server for RawBT'));
+    };
+  });
 }
 
 async function checarPedidoPendente() {
@@ -233,23 +249,28 @@ async function checarPedidoPendente() {
     const data = await resp.json();
 
     if (data && data.found) {
-      addLog('Novo pedido encontrado (id: ' + data.id + '). Enviando para o RawBT...', 'success');
+      addLog('Novo pedido encontrado (id: ' + data.id + '). Enviando para impressão...', 'success');
       setStatus('on', 'Imprimindo...', 'Pedido ' + data.id);
 
       lastPrinted = data;
       el.btnReprint.disabled = false;
 
-      // Marca como impresso ANTES de imprimir — assim, mesmo que o RawBT
-      // demore ou peça confirmação, o pedido nunca fica preso na fila de novo.
-      await fetch(base + '/fila-impressao/marcar-impresso', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: data.id })
-      });
-      addLog('Pedido ' + data.id + ' marcado como impresso.', 'success');
+      try {
+        await acionarRawbt(data.texto);
+        addLog('Pedido ' + data.id + ' impresso.', 'success');
 
-      // Aciona o RawBT (navegação direta)
-      acionarRawbt(data.texto);
+        // Só marca como impresso DEPOIS de confirmar o envio pro Server for RawBT.
+        // Assim, se a impressão falhar, o pedido continua pendente e é tentado de novo
+        // na próxima checagem, em vez de se perder da fila.
+        await fetch(base + '/fila-impressao/marcar-impresso', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: data.id })
+        });
+        addLog('Pedido ' + data.id + ' marcado como impresso.', 'success');
+      } catch (printErr) {
+        addLog('Falha ao imprimir pedido ' + data.id + ': ' + printErr.message, 'error');
+      }
 
       setStatus('on', 'Monitorando', 'Última checagem: ' + new Date().toLocaleTimeString('pt-BR'));
     } else {
@@ -292,7 +313,9 @@ el.btnStop.addEventListener('click', () => {
 el.btnReprint.addEventListener('click', () => {
   if (!lastPrinted) return;
   addLog('Reimprimindo pedido ' + lastPrinted.id + '...');
-  acionarRawbt(lastPrinted.texto);
+  acionarRawbt(lastPrinted.texto)
+    .then(() => addLog('Pedido ' + lastPrinted.id + ' reimpresso.', 'success'))
+    .catch(err => addLog('Falha ao reimprimir: ' + err.message, 'error'));
 });
 </script>
 </body>

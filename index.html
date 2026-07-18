@@ -129,12 +129,52 @@
     color: var(--accent);
     margin-left: 6px;
   }
+
+  .alert-card {
+    display: none;
+    background: var(--card);
+    border: 2px solid var(--accent);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+    animation: pulse 1.1s infinite;
+  }
+  .alert-card h2 {
+    font-size: 15px;
+    color: var(--accent);
+    margin: 0 0 10px;
+    text-transform: none;
+    letter-spacing: normal;
+  }
+  .alert-detail {
+    font-size: 13px;
+    color: var(--text);
+    white-space: pre-line;
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+  .btn-alert {
+    background: var(--ok);
+    color: #04150c;
+    font-size: 17px;
+    padding: 18px;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,106,61,0.5); }
+    50% { box-shadow: 0 0 0 10px rgba(255,106,61,0); }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🖨️ Ponte de Impressão <span class="badge">RawBT</span></h1>
-  <div class="sub">Deixe esta página aberta no celular que tem o RawBT instalado. Ela fica checando novos pedidos no n8n e manda imprimir automaticamente.</div>
+  <div class="sub">Deixe esta página aberta no celular que tem o RawBT instalado. Ela fica checando novos pedidos no n8n e avisa quando chegar um novo.</div>
+
+  <div class="alert-card" id="alertCard">
+    <h2>🔔 Novo pedido chegou!</h2>
+    <div class="alert-detail" id="alertDetail"></div>
+    <button class="btn-alert" id="btnImprimirAgora">🖨️ Imprimir pedido</button>
+  </div>
 
   <div class="card">
     <h2>Configuração</h2>
@@ -167,7 +207,9 @@
 <script>
 let polling = false;
 let timer = null;
+let reminderTimer = null;
 let lastPrinted = null;
+let pendingOrder = null;
 
 const el = {
   baseUrl: document.getElementById('baseUrl'),
@@ -179,6 +221,9 @@ const el = {
   statusText: document.getElementById('statusText'),
   statusDetail: document.getElementById('statusDetail'),
   log: document.getElementById('log'),
+  alertCard: document.getElementById('alertCard'),
+  alertDetail: document.getElementById('alertDetail'),
+  btnImprimirAgora: document.getElementById('btnImprimirAgora'),
 };
 
 function addLog(message, type) {
@@ -207,38 +252,49 @@ function utf8ToBase64(str) {
   }
 }
 
-// Envia o pedido para impressão via WebSocket local (app "Server for RawBT", porta 40213).
-// Diferente da navegação por esquema de URL (rawbt:...), uma conexão WebSocket é apenas
-// uma chamada de rede e não exige gesto do usuário — por isso funciona mesmo quando
-// disparada automaticamente pelo timer, sem toque na tela. O app "Server for RawBT"
-// precisa estar instalado e aberto em segundo plano no mesmo celular da impressora.
+// Aciona o RawBT via esquema de URL. Isso exige um toque real do usuário
+// (gesto), por isso NUNCA é chamado automaticamente pelo timer — só pelo
+// clique no botão "Imprimir pedido" ou "Reimprimir último pedido".
 function acionarRawbt(texto) {
-  return new Promise((resolve, reject) => {
-    const init = '\x1B\x40';       // ESC @ (reset)
-    const corte = '\x1D\x56\x00';  // GS V 0 (corte total)
-    const conteudo = init + texto + '\n\n\n' + corte;
-    const base64 = utf8ToBase64(conteudo);
+  const init = '\x1B\x40';       // ESC @ (reset)
+  const corte = '\x1D\x56\x00';  // GS V 0 (corte total)
+  const conteudo = init + texto + '\n\n\n' + corte;
+  const base64 = utf8ToBase64(conteudo);
+  window.location.href = 'rawbt:base64,' + base64;
+}
 
-    const socket = new WebSocket('ws://127.0.0.1:40213/');
-    socket.binaryType = 'arraybuffer';
-
-    const timeoutId = setTimeout(() => {
-      socket.close();
-      reject(new Error('Timeout ao conectar no Server for RawBT (app está aberto?)'));
-    }, 4000);
-
-    socket.onopen = () => {
-      clearTimeout(timeoutId);
-      socket.send(base64);
-      socket.close(1000, 'Work complete');
-      resolve();
+// Toca um beep usando Web Audio API (não depende de nenhum arquivo externo).
+function playAlertSound() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const playBeep = (delay) => {
+      setTimeout(() => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = 880;
+        gain.gain.value = 0.15;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.18);
+      }, delay);
     };
+    playBeep(0);
+    playBeep(250);
+  } catch (e) {
+    // Se o navegador bloquear áudio automático, ignora silenciosamente.
+  }
+}
 
-    socket.onerror = () => {
-      clearTimeout(timeoutId);
-      reject(new Error('Falha ao conectar no Server for RawBT'));
-    };
-  });
+function mostrarAlerta(data) {
+  el.alertDetail.textContent = data.texto;
+  el.alertCard.style.display = 'block';
+}
+
+function esconderAlerta() {
+  el.alertCard.style.display = 'none';
+  el.alertDetail.textContent = '';
 }
 
 async function checarPedidoPendente() {
@@ -249,31 +305,30 @@ async function checarPedidoPendente() {
     const data = await resp.json();
 
     if (data && data.found) {
-      addLog('Novo pedido encontrado (id: ' + data.id + '). Enviando para impressão...', 'success');
-      setStatus('on', 'Imprimindo...', 'Pedido ' + data.id);
+      if (!pendingOrder || pendingOrder.id !== data.id) {
+        pendingOrder = data;
+        addLog('Novo pedido encontrado (id: ' + data.id + '). Toque em "Imprimir pedido".', 'success');
+        mostrarAlerta(data);
+        playAlertSound();
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 200]);
 
-      lastPrinted = data;
-      el.btnReprint.disabled = false;
-
-      try {
-        await acionarRawbt(data.texto);
-        addLog('Pedido ' + data.id + ' impresso.', 'success');
-
-        // Só marca como impresso DEPOIS de confirmar o envio pro Server for RawBT.
-        // Assim, se a impressão falhar, o pedido continua pendente e é tentado de novo
-        // na próxima checagem, em vez de se perder da fila.
-        await fetch(base + '/fila-impressao/marcar-impresso', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: data.id })
-        });
-        addLog('Pedido ' + data.id + ' marcado como impresso.', 'success');
-      } catch (printErr) {
-        addLog('Falha ao imprimir pedido ' + data.id + ': ' + printErr.message, 'error');
+        // Lembrete: repete o som a cada 15s enquanto o pedido não for impresso,
+        // pra garantir que ninguém deixe passar despercebido.
+        clearInterval(reminderTimer);
+        reminderTimer = setInterval(() => {
+          if (pendingOrder) {
+            playAlertSound();
+            if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+          }
+        }, 15000);
       }
-
-      setStatus('on', 'Monitorando', 'Última checagem: ' + new Date().toLocaleTimeString('pt-BR'));
+      setStatus('on', 'Pedido aguardando impressão', 'Pedido ' + data.id);
     } else {
+      if (pendingOrder) {
+        pendingOrder = null;
+        esconderAlerta();
+        clearInterval(reminderTimer);
+      }
       setStatus('on', 'Monitorando', 'Nenhum pedido pendente · ' + new Date().toLocaleTimeString('pt-BR'));
     }
   } catch (err) {
@@ -281,6 +336,33 @@ async function checarPedidoPendente() {
     addLog('Erro ao checar fila: ' + err.message, 'error');
   }
 }
+
+el.btnImprimirAgora.addEventListener('click', async () => {
+  if (!pendingOrder) return;
+  const base = el.baseUrl.value.replace(/\/$/, '');
+  const order = pendingOrder;
+
+  acionarRawbt(order.texto);
+  addLog('Pedido ' + order.id + ' enviado para impressão.', 'success');
+
+  try {
+    await fetch(base + '/fila-impressao/marcar-impresso', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: order.id })
+    });
+    addLog('Pedido ' + order.id + ' marcado como impresso.', 'success');
+  } catch (err) {
+    addLog('Falha ao marcar pedido ' + order.id + ' como impresso: ' + err.message, 'error');
+  }
+
+  lastPrinted = order;
+  el.btnReprint.disabled = false;
+  pendingOrder = null;
+  esconderAlerta();
+  clearInterval(reminderTimer);
+  setStatus('on', 'Monitorando', 'Nenhum pedido pendente · ' + new Date().toLocaleTimeString('pt-BR'));
+});
 
 el.btnStart.addEventListener('click', () => {
   if (!el.baseUrl.value.trim()) {
@@ -302,6 +384,7 @@ el.btnStart.addEventListener('click', () => {
 el.btnStop.addEventListener('click', () => {
   polling = false;
   clearInterval(timer);
+  clearInterval(reminderTimer);
   el.btnStart.disabled = false;
   el.btnStop.disabled = true;
   el.baseUrl.disabled = false;
@@ -313,9 +396,7 @@ el.btnStop.addEventListener('click', () => {
 el.btnReprint.addEventListener('click', () => {
   if (!lastPrinted) return;
   addLog('Reimprimindo pedido ' + lastPrinted.id + '...');
-  acionarRawbt(lastPrinted.texto)
-    .then(() => addLog('Pedido ' + lastPrinted.id + ' reimpresso.', 'success'))
-    .catch(err => addLog('Falha ao reimprimir: ' + err.message, 'error'));
+  acionarRawbt(lastPrinted.texto);
 });
 </script>
 </body>
